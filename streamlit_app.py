@@ -14,6 +14,15 @@ import streamlit as st
 
 from paper_trading_engine import generate_synthetic_ohlcv, PaperTradingEngine
 
+
+@st.cache_data
+def _sample_csv_bytes() -> bytes:
+    """500-bar synthetic OHLCV file users can download and re-upload to test the CSV path."""
+    df = generate_synthetic_ohlcv(n_bars=500, seed=99)
+    df.index.name = "date"
+    return df.reset_index().to_csv(index=False).encode("utf-8")
+
+
 # ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
@@ -30,6 +39,159 @@ st.caption(
     "Four independent strategies from the CFI Guide to Trading — "
     "fully simulated with no real money at risk."
 )
+
+# ─────────────────────────────────────────────
+# INSTRUCTIONS PANEL
+# ─────────────────────────────────────────────
+
+with st.expander("How to Use This App", expanded=False):
+    tab_use, tab_csv, tab_sources = st.tabs(
+        ["Using the App", "CSV Format", "Data Sources"]
+    )
+
+    with tab_use:
+        st.markdown("""
+### Quick Start
+
+**Step 1 — Choose a data source** (sidebar)
+- **Synthetic (GBM)**: Generates realistic price data instantly via Geometric Brownian Motion.
+  No setup required — good for exploring strategy behaviour and parameter sensitivity.
+- **Upload CSV**: Run the backtest on real market data you provide.
+  Download a pre-formatted sample file from the sidebar to see the expected layout.
+
+**Step 2 — Set simulation parameters** (sidebar)
+
+| Parameter | What it controls |
+|---|---|
+| Starting Capital | Initial portfolio value ($) |
+| Risk per Trade | Fraction of equity risked on each trade (position sizing via fixed-fractional) |
+| Number of Bars | Candles in the synthetic dataset — more bars produce more trades |
+| Annual Drift | Directional trend of the synthetic price series |
+| Daily Volatility | Day-to-day price swing magnitude |
+
+**Step 3 — Run Backtest**
+Click **Run Backtest**. Results are cached — re-running with identical settings is instant.
+Change any parameter and click again to compare.
+
+**Step 4 — Read the Results**
+
+| Section | What to look for |
+|---|---|
+| Strategy Summary | Final capital and total return at a glance for all four strategies |
+| Equity Curves | Portfolio growth per bar; red shading = drawdown (gap below peak equity) |
+| Strategy Detail tabs | Win rate, max drawdown, and a colour-coded trade log (green = profit, red = loss) |
+
+**The four strategies**
+
+| ID | Name | Signal | Exit |
+|---|---|---|---|
+| A | Pin Bar Scalping | Candle tail ≥ 2.5× body, extended past 10/21 EMA | 10 EMA touch or 1-tick stop |
+| B | Golden / Death Cross | 50 SMA crosses above/below 200 SMA | Held until opposite crossover |
+| C | 5-8-13 Fib EMA | 5 EMA crosses 13 EMA with ribbon fanning | Held until opposite crossover |
+| D | ADX Breakout | ADX crosses above 25 with positive slope | ADX drops below 25 or slope turns negative |
+""")
+
+    with tab_csv:
+        st.markdown("""
+### CSV Format Requirements
+
+The engine accepts any OHLCV time series at any timeframe (daily, hourly, 5-minute, etc.).
+
+**Required columns** — names are normalised to lowercase automatically:
+
+| Column | Description |
+|---|---|
+| `open` | Bar opening price |
+| `high` | Bar high price |
+| `low` | Bar low price |
+| `close` | Bar closing price |
+| `volume` | Traded volume (any unit) |
+
+- Extra columns (dates, ticker symbols, adjusted close) are ignored.
+- Rows with any missing OHLCV value are dropped automatically.
+- There is no minimum row count, but strategies with long lookback periods
+  (e.g. Golden Cross uses a 200-bar SMA) need at least 300–500 rows to fire signals.
+
+**Minimal valid example:**
+```
+open,high,low,close,volume
+100.12,102.45,99.87,101.33,1250000
+101.33,103.10,100.90,102.78,980000
+102.78,104.22,101.50,103.91,870000
+```
+
+**Yahoo Finance export example** (extra columns are fine — automatically dropped):
+```
+Date,Open,High,Low,Close,Adj Close,Volume
+2024-01-02,476.33,479.05,475.82,478.57,478.57,52341200
+2024-01-03,478.20,479.44,472.71,473.15,473.15,61234800
+```
+
+Download the sample file from the sidebar (**Upload CSV** mode) to see a ready-to-use 500-bar CSV.
+""")
+
+    with tab_sources:
+        st.markdown("""
+### Recommended Free Data Sources
+
+| Source | Asset Classes | Notes |
+|---|---|---|
+| **Yahoo Finance** | Stocks, ETFs, Crypto, FX, Indices | Easiest. Manual download or `yfinance` library |
+| **Alpha Vantage** | Stocks, FX, Crypto | Free API key; 25 requests/day on free tier |
+| **Binance** | Crypto (spot & futures) | Best crypto OHLCV; REST API, no key for public data |
+| **Stooq** | Global stocks, Indices, FX | Direct CSV downloads; no account needed |
+| **Kaggle** | Curated datasets (various) | Search "OHLCV" for ready-to-use backtest files |
+| **FRED** | Bonds, rates, commodities | Macro data; good for macro overlay strategies |
+
+---
+
+#### Yahoo Finance — quickest manual path
+1. Go to [finance.yahoo.com](https://finance.yahoo.com) and search for any ticker (e.g. **SPY**)
+2. Click **Historical Data** tab
+3. Set your date range and click **Download**
+4. Upload the downloaded `.csv` directly — column names are normalised automatically
+
+---
+
+#### Yahoo Finance via Python (`yfinance`)
+```python
+pip install yfinance
+
+import yfinance as yf
+
+df = yf.download("SPY", start="2018-01-01", end="2024-01-01")
+df.columns = [c.lower() for c in df.columns]
+df = df[["open", "high", "low", "close", "volume"]].dropna()
+df.to_csv("spy_daily.csv", index=False)
+# Upload spy_daily.csv to this app
+```
+
+#### Binance crypto data via Python
+```python
+pip install python-binance
+
+from binance.client import Client
+import pandas as pd
+
+client = Client()          # no API key needed for public endpoints
+klines = client.get_historical_klines(
+    "BTCUSDT", Client.KLINE_INTERVAL_1DAY,
+    "1 Jan, 2021", "1 Jan, 2024"
+)
+df = pd.DataFrame(klines, columns=[
+    "date","open","high","low","close","volume",
+    "close_time","quote_vol","trades","taker_buy_base",
+    "taker_buy_quote","ignore"
+])
+df = df[["open","high","low","close","volume"]].astype(float)
+df.to_csv("btcusdt_daily.csv", index=False)
+```
+
+#### Stooq manual download (no account needed)
+1. Go to [stooq.com](https://stooq.com/q/d/?s=spy.us) (example: SPY)
+2. Click the **Download Data** icon
+3. Upload the `.txt` file — it uses comma-separated OHLCV format
+""")
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -49,11 +211,20 @@ with st.sidebar:
 
     uploaded_file = None
     if data_source == "Upload CSV":
-        uploaded_file = st.file_uploader(
-            "OHLCV CSV (columns: open, high, low, close, volume)",
-            type=["csv"],
+        st.download_button(
+            label="Download sample CSV",
+            data=_sample_csv_bytes(),
+            file_name="sample_ohlcv_500bars.csv",
+            mime="text/csv",
+            use_container_width=True,
+            help="500-bar synthetic OHLCV file — upload it straight back to test the CSV path.",
         )
-        st.caption("Column names must be lowercase.")
+        uploaded_file = st.file_uploader(
+            "Upload your OHLCV CSV",
+            type=["csv"],
+            help="Required columns: open, high, low, close, volume (case-insensitive).",
+        )
+        st.caption("See the **How to Use** panel above for format details and data sources.")
 
     st.divider()
 
