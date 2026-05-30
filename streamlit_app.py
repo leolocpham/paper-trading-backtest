@@ -294,7 +294,7 @@ for tab, (sid, _) in zip(tabs, STRATEGY_LABELS.items()):
                 return colour
 
             st.dataframe(
-                df_trades.style.applymap(colour_pnl, subset=["P&L ($)", "P&L (%)"]),
+                df_trades.style.map(colour_pnl, subset=["P&L ($)", "P&L (%)"]),
                 use_container_width=True,
                 hide_index=True,
             )
