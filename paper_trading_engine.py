@@ -89,6 +89,7 @@ class Position:
     size:        float  # number of units held
     stop_loss:   float  # hard stop price level
     ticker:      str = "ASSET"
+    reason:      str = ""   # human-readable signal explanation
 
 
 @dataclass
@@ -104,6 +105,7 @@ class Trade:
     pnl:         float   # realised P&L in dollar terms
     pnl_pct:     float   # P&L as % of entry notional
     ticker:      str = "ASSET"
+    reason:      str = ""   # carried from Position; explains why the trade was entered
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -502,6 +504,8 @@ class PaperTradingEngine:
         # Reserve capital (identical treatment for long and short)
         self.cash[strategy] -= size * entry_price
 
+        reason = self._build_reason(i, strategy, direction, entry_price, stop)
+
         self.position[strategy] = Position(
             strategy    = strategy,
             direction   = direction,
@@ -510,6 +514,7 @@ class PaperTradingEngine:
             size        = size,
             stop_loss   = stop,
             ticker      = self.ticker,
+            reason      = reason,
         )
 
     def _close_position(
@@ -545,7 +550,97 @@ class PaperTradingEngine:
             pnl         = pnl,
             pnl_pct     = pnl_pct,
             ticker      = pos.ticker,
+            reason      = pos.reason,
         ))
+
+    def _build_reason(
+        self, i: int, strategy: str, direction: str, entry_price: float, stop: float
+    ) -> str:
+        """
+        Return a human-readable explanation of why this signal triggered,
+        including the specific indicator values that satisfied the entry logic.
+        Stored on the Trade record for study / drill-down purposes.
+        """
+        df  = self.df
+        ind = self.ind
+        p   = i - 1  # the completed bar that generated the signal
+
+        try:
+            if strategy == "A_PinBar":
+                o, h, l, c = df.loc[p, ["open", "high", "low", "close"]]
+                body       = abs(c - o)
+                tail       = (min(o, c) - l) if direction == "long" else (h - max(o, c))
+                ratio      = tail / max(body, 1e-9)
+                ext_val    = l if direction == "long" else h
+                ema10_p    = ind.loc[p, "ema10"]
+                ema21_p    = ind.loc[p, "ema21"]
+                ema10_i    = ind.loc[i, "ema10"]
+                pin_type   = "Bullish" if direction == "long" else "Bearish"
+                ext_dir    = "below" if direction == "long" else "above"
+                side       = "lower" if direction == "long" else "upper"
+                return (
+                    f"{pin_type} pin bar on bar {p}. "
+                    f"{side.capitalize()} tail = {tail:.4f} ({ratio:.1f}× body = {body:.4f}). "
+                    f"Candle {'low' if direction=='long' else 'high'} ({ext_val:.4f}) was "
+                    f"{ext_dir} both 10 EMA ({ema10_p:.4f}) and 21 EMA ({ema21_p:.4f}), "
+                    f"confirming price extension. "
+                    f"Entry at bar {i} open = {entry_price:.4f}. "
+                    f"Hard stop = {stop:.4f} (1 tick past pin tail). "
+                    f"Take-profit target = 10 EMA ({ema10_i:.4f})."
+                )
+
+            elif strategy == "B_GoldenCross":
+                s50_now  = ind.loc[i, "sma50"]
+                s200_now = ind.loc[i, "sma200"]
+                s50_prev = ind.loc[p, "sma50"]
+                s200_prev = ind.loc[p, "sma200"]
+                cross = ("Golden Cross: 50 SMA crossed above 200 SMA (bullish)"
+                         if direction == "long"
+                         else "Death Cross: 50 SMA crossed below 200 SMA (bearish)")
+                return (
+                    f"{cross} on bar {i}. "
+                    f"50 SMA: {s50_prev:.4f} -> {s50_now:.4f}. "
+                    f"200 SMA: {s200_prev:.4f} -> {s200_now:.4f}. "
+                    f"Position held until the opposite crossover occurs."
+                )
+
+            elif strategy == "C_FibEMA":
+                e5   = ind.loc[i, "ema5"]
+                e8   = ind.loc[i, "ema8"]
+                e13  = ind.loc[i, "ema13"]
+                e5p  = ind.loc[p, "ema5"]
+                e13p = ind.loc[p, "ema13"]
+                spread_now  = abs(e5 - e13)
+                spread_prev = abs(e5p - e13p)
+                bull   = direction == "long"
+                dtype  = "Bullish" if bull else "Bearish"
+                stack  = "5 > 8 > 13 (bullish stack)" if bull else "5 < 8 < 13 (bearish stack)"
+                xword  = "above" if bull else "below"
+                return (
+                    f"{dtype} 5-8-13 EMA crossover on bar {i}. "
+                    f"5 EMA ({e5:.4f}) crossed {xword} 13 EMA ({e13:.4f}). "
+                    f"8 EMA = {e8:.4f} — lines aligned: {stack}. "
+                    f"Ribbon spread widened {spread_prev:.4f} -> {spread_now:.4f} (fanning confirmed). "
+                    f"Position held until the opposite crossover."
+                )
+
+            elif strategy == "D_ADXBreakout":
+                adx_now  = ind.loc[i, "adx"]
+                adx_prev = ind.loc[p, "adx"]
+                start    = max(0, i - 3)
+                closes   = df.loc[start:i, "close"].values
+                slope    = float(np.polyfit(range(len(closes)), closes, 1)[0])
+                trend    = "upward" if slope > 0 else "downward"
+                return (
+                    f"ADX breakout on bar {i}. "
+                    f"ADX rose {adx_prev:.2f} -> {adx_now:.2f} (crossed above 25). "
+                    f"4-bar price OLS slope = {slope:+.4f} ({trend} trend). "
+                    f"Exit: close when ADX drops below 25 or ADX slope turns negative."
+                )
+        except Exception:
+            pass  # if indicator data is missing, return a minimal fallback
+
+        return f"{strategy} {direction} signal triggered on bar {i} at {entry_price:.4f}."
 
     @staticmethod
     def _unrealised_pnl(pos: Position, current_price: float) -> float:
