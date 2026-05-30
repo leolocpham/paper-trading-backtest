@@ -88,6 +88,7 @@ class Position:
     entry_index: int
     size:        float  # number of units held
     stop_loss:   float  # hard stop price level
+    ticker:      str = "ASSET"
 
 
 @dataclass
@@ -102,6 +103,7 @@ class Trade:
     size:        float
     pnl:         float   # realised P&L in dollar terms
     pnl_pct:     float   # P&L as % of entry notional
+    ticker:      str = "ASSET"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -136,11 +138,13 @@ class PaperTradingEngine:
         starting_capital: float = 100_000.0,
         risk_per_trade:   float = 0.01,   # fraction of equity risked per trade
         tick_size:        float = 0.01,   # min price increment for SL placement
+        ticker:           str   = "ASSET",
     ) -> None:
         self.df               = df.copy().reset_index(drop=True)
         self.starting_capital = starting_capital
         self.risk_per_trade   = risk_per_trade
         self.tick_size        = tick_size
+        self.ticker           = ticker.upper()
 
         # Independent state per strategy
         self.cash:         dict[str, float]             = {s: starting_capital for s in self.STRATEGIES}
@@ -505,6 +509,7 @@ class PaperTradingEngine:
             entry_index = i,
             size        = size,
             stop_loss   = stop,
+            ticker      = self.ticker,
         )
 
     def _close_position(
@@ -539,6 +544,7 @@ class PaperTradingEngine:
             size        = pos.size,
             pnl         = pnl,
             pnl_pct     = pnl_pct,
+            ticker      = pos.ticker,
         ))
 
     @staticmethod
@@ -607,7 +613,7 @@ class PaperTradingEngine:
             max_dd = dd_pct.min()
 
             print(divider)
-            print(f"  STRATEGY : {strategy}")
+            print(f"  STRATEGY : {strategy}  |  TICKER : {self.ticker}")
             print(divider)
             print(f"  Total Trades Executed  : {n_total:>6}")
             print(f"  Win Rate               : {win_rate:>6.1f}%")
@@ -688,6 +694,7 @@ if __name__ == "__main__":
         starting_capital = 100_000.0,
         risk_per_trade   = 0.01,    # risk 1% of equity per trade
         tick_size        = 0.01,    # 1 cent minimum stop distance
+        ticker           = "SYNTHETIC",
     )
 
     # ── 3. Compute all indicators ────────────────────────────────────────

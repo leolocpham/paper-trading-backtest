@@ -17,10 +17,12 @@ from paper_trading_engine import generate_synthetic_ohlcv, PaperTradingEngine
 
 @st.cache_data
 def _sample_csv_bytes() -> bytes:
-    """500-bar synthetic OHLCV file users can download and re-upload to test the CSV path."""
+    """500-bar synthetic OHLCV file with a ticker column for testing the CSV upload path."""
     df = generate_synthetic_ohlcv(n_bars=500, seed=99)
     df.index.name = "date"
-    return df.reset_index().to_csv(index=False).encode("utf-8")
+    out = df.reset_index()
+    out.insert(1, "ticker", "SAMPLE")   # ticker column right after date
+    return out.to_csv(index=False).encode("utf-8")
 
 
 # ─────────────────────────────────────────────
@@ -209,7 +211,9 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    uploaded_file = None
+    csv_bytes       = None   # raw bytes of the uploaded file (read once here)
+    selected_ticker = "ASSET"
+
     if data_source == "Upload CSV":
         st.download_button(
             label="Download sample CSV",
@@ -217,13 +221,37 @@ with st.sidebar:
             file_name="sample_ohlcv_500bars.csv",
             mime="text/csv",
             use_container_width=True,
-            help="500-bar synthetic OHLCV file — upload it straight back to test the CSV path.",
+            help="500-bar synthetic OHLCV with a ticker column — upload it back to test the CSV path.",
         )
         uploaded_file = st.file_uploader(
             "Upload your OHLCV CSV",
             type=["csv"],
             help="Required columns: open, high, low, close, volume (case-insensitive).",
         )
+        if uploaded_file is not None:
+            csv_bytes = uploaded_file.read()   # read once; reuse via io.BytesIO later
+
+            # Detect any ticker column and let the user pick
+            peek = pd.read_csv(io.BytesIO(csv_bytes))
+            peek.columns = [c.strip().lower() for c in peek.columns]
+            if "ticker" in peek.columns:
+                tickers = sorted(peek["ticker"].dropna().str.upper().unique().tolist())
+                if len(tickers) == 1:
+                    selected_ticker = tickers[0]
+                    st.info(f"Ticker detected: **{selected_ticker}**")
+                else:
+                    selected_ticker = st.selectbox(
+                        "Select Ticker",
+                        tickers,
+                        help="The CSV contains multiple tickers. The backtest runs on one at a time.",
+                    )
+            else:
+                selected_ticker = st.text_input(
+                    "Ticker Label",
+                    value="ASSET",
+                    help="No ticker column found — enter a label that will appear in the trade log.",
+                ).upper()
+
         st.caption("See the **How to Use** panel above for format details and data sources.")
 
     st.divider()
@@ -251,10 +279,15 @@ with st.sidebar:
     if data_source == "Synthetic (GBM)":
         st.divider()
         st.subheader("Synthetic Data Settings")
-        n_bars   = st.slider("Number of Bars",     300, 3_000, 1_200, 100)
-        seed     = int(st.number_input("Random Seed", 1, 9999, 42))
-        drift_pct = st.slider("Annual Drift (%)",   -30, 30, 8)
-        vol_pct   = st.slider("Daily Volatility (%)", 0.5, 5.0, 1.5, 0.1)
+        selected_ticker = st.text_input(
+            "Ticker Label",
+            value="SYNTHETIC",
+            help="Label shown in the trade log and performance report.",
+        ).upper()
+        n_bars    = st.slider("Number of Bars",       300, 3_000, 1_200, 100)
+        seed      = int(st.number_input("Random Seed", 1, 9999, 42))
+        drift_pct = st.slider("Annual Drift (%)",      -30, 30, 8)
+        vol_pct   = st.slider("Daily Volatility (%)",  0.5, 5.0, 1.5, 0.1)
 
     st.divider()
     run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
@@ -264,13 +297,14 @@ with st.sidebar:
 # BACKTEST EXECUTION (CACHED)
 # ─────────────────────────────────────────────
 
-def _execute(df: pd.DataFrame, cap: float, risk: float) -> dict:
+def _execute(df: pd.DataFrame, cap: float, risk: float, ticker: str = "ASSET") -> dict:
     """
     Run the engine and return a plain serialisable dict so
     st.cache_data can hash/pickle the result without issues.
     """
     engine = PaperTradingEngine(df=df, starting_capital=cap,
-                                risk_per_trade=risk, tick_size=0.01)
+                                risk_per_trade=risk, tick_size=0.01,
+                                ticker=ticker)
     engine.calculate_indicators()
     engine.run()
 
@@ -290,6 +324,7 @@ def _execute(df: pd.DataFrame, cap: float, risk: float) -> dict:
 
         rows = [
             {
+                "Ticker":      t.ticker,
                 "Direction":   t.direction.capitalize(),
                 "Entry Price": round(t.entry_price, 4),
                 "Exit Price":  round(t.exit_price,  4),
@@ -317,26 +352,31 @@ def _execute(df: pd.DataFrame, cap: float, risk: float) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def run_synthetic(n_bars, cap, risk, seed, drift_ann_pct, vol_daily_pct):
+def run_synthetic(n_bars, cap, risk, seed, drift_ann_pct, vol_daily_pct, ticker="SYNTHETIC"):
     df = generate_synthetic_ohlcv(
         n_bars=n_bars,
         volatility=vol_daily_pct / 100,
         drift=drift_ann_pct / 100 / 252,
         seed=seed,
     )
-    return _execute(df, cap, risk)
+    return _execute(df, cap, risk, ticker)
 
 
 @st.cache_data(show_spinner=False)
-def run_csv(csv_bytes: bytes, cap: float, risk: float) -> dict:
+def run_csv(csv_bytes: bytes, cap: float, risk: float, ticker: str = "ASSET") -> dict:
     df = pd.read_csv(io.BytesIO(csv_bytes))
     df.columns = [c.strip().lower() for c in df.columns]
+
+    # Filter to the requested ticker if the column is present
+    if "ticker" in df.columns:
+        df = df[df["ticker"].str.upper() == ticker.upper()].drop(columns=["ticker"])
+
     required = {"open", "high", "low", "close", "volume"}
     missing  = required - set(df.columns)
     if missing:
         raise ValueError(f"CSV is missing required columns: {missing}")
     df = df[sorted(required)].dropna().reset_index(drop=True)
-    return _execute(df, cap, risk)
+    return _execute(df, cap, risk, ticker)
 
 
 # Determine whether to (re-)run
@@ -344,23 +384,24 @@ need_run = run_btn or ("results" not in st.session_state)
 
 if need_run:
     if data_source == "Upload CSV":
-        if uploaded_file is None:
+        if csv_bytes is None:
             if run_btn:
                 st.warning("Please upload a CSV file before clicking Run.")
                 st.stop()
             else:
-                # First load with CSV selected — auto-run with defaults
-                data_source = "Synthetic (GBM)"
+                # First load with CSV mode selected but no file yet — fall back to synthetic
+                data_source     = "Synthetic (GBM)"
+                selected_ticker = "SYNTHETIC"
                 n_bars, seed, drift_pct, vol_pct = 1_200, 42, 8, 1.5
 
     with st.spinner("Running backtest across all four strategies..."):
         try:
             if data_source == "Upload CSV":
-                results = run_csv(uploaded_file.read(), starting_capital, risk_pct / 100)
+                results = run_csv(csv_bytes, starting_capital, risk_pct / 100, selected_ticker)
             else:
                 results = run_synthetic(
                     n_bars, starting_capital, risk_pct / 100,
-                    seed, drift_pct, vol_pct,
+                    seed, drift_pct, vol_pct, selected_ticker,
                 )
             st.session_state["results"] = results
         except Exception as exc:
